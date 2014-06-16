@@ -37,6 +37,8 @@ exports.defaults = {
 // PROXY protocol (http://haproxy.1wt.eu/download/1.5/doc/proxy-protocol.txt)
 // strict option drops requests without proxy headers, enabled by default to match previous behavior, disable to allow both proxied and non-proxied requests
 exports.proxy = function(iface, options) {
+  console.log('ZHZHZH in Proxywrap.proxy');
+
 	var exports = {};
 
 	options = options || {};
@@ -66,6 +68,7 @@ exports.proxy = function(iface, options) {
 		// add the old connection listeners to a custom event, which we'll fire after processing the PROXY header
 		for (var i = 0; i < cl.length; i++) {
 			this.addListener('proxiedConnection', cl[i]);
+      console.log('original connection listener ' + i + ' ' + cl[i]);
 		}
 
 
@@ -89,8 +92,50 @@ exports.proxy = function(iface, options) {
 		//if (legacy) socket.once('data', ondata);
 
 		// override the socket's event emitter so we can process data (and discard the PROXY protocol header) before the underlying Server gets it
+    /*
+      xxx what about other event?
+
+      Class: http.Server
+        Event: 'request'
+        Event: 'connection'
+        Event: 'close'
+        Event: 'checkContinue'
+        Event: 'connect'
+        Event: 'upgrade'
+        Event: 'clientError'
+
+      Class: net.socket
+        Event: 'connect'
+        Event: 'data'
+        Event: 'end'
+        Event: 'timeout'
+        Event: 'drain'
+        Event: 'error'
+        Event: 'close'
+
+      Class: stream.Readable
+        Event: 'readable'
+        Event: 'data'
+        Event: 'end'
+        Event: 'close'
+        Event: 'error'
+
+      Class: stream.Writable
+        Event: 'drain'
+        Event: 'finish'
+        Event: 'pipe'
+        Event: 'unpipe'
+        Event: 'error'
+    */
 		socket.emit = function(event, data) {
 			history.push(Array.prototype.slice.call(arguments));
+      // xxx
+      // what about other events emitted by socket and stream.Readable that may pop up after connection is made:
+      //   data, end, timeout, drain, error, close
+      // all these events are swallowed up and not emitted
+      //
+      // is data on readable different
+      console.log('proxyWrap history ' + util.inspect(history));
 			/*if (event == 'data') {
 				console.log('got a data event :(');
 				socket.destroy();
@@ -103,6 +148,9 @@ exports.proxy = function(iface, options) {
 			//if (legacy) socket.removeListener('data', ondata);
 			// restore normal socket functionality, and fire any events that were emitted while we had control of emit()
 			socket.emit = realEmit;
+
+      // xxx is it ok to emit multiple readable events? when one would suffice?
+      // should we only handle readable and data events?   what about internal events?
 			for (var i = 0; i < history.length; i++) {
 				realEmit.apply(socket, history[i]);
 				if (history[i][0] == 'end' && socket.onend) socket.onend();
@@ -110,6 +158,7 @@ exports.proxy = function(iface, options) {
 			history = null;
 		}
 
+    // xxx readable is supposed to be consumed by parser handler, but I'm guessing this behaviour is overriden by removing listeners
 		socket.on('readable', onReadable);
 
 		var header = '', buf = new Buffer(0);
@@ -118,6 +167,8 @@ exports.proxy = function(iface, options) {
 			while (null != (chunk = socket.read())) {
 				buf = Buffer.concat([buf, chunk]);
 				header += chunk.toString('ascii');
+        console.log('onReadable header ' + util.inspect(header));
+
 
 				// if the first 5 bytes aren't PROXY, something's not right.
 				if (header.length >= 5 && header.substr(0, 5) != 'PROXY') {
@@ -127,6 +178,7 @@ exports.proxy = function(iface, options) {
 					}
 				}
 
+        // xxx spec: crlf
 				var crlf = header.indexOf('\r');
 				if (crlf > 0 || protocolError) {
 					socket.removeListener('readable', onReadable);
@@ -134,7 +186,9 @@ exports.proxy = function(iface, options) {
 
 					var hlen = header.length;
 					header = header.split(' ');
+          console.log('proxyWrap Header ' + require('util').inspect(header));
 	
+          // xxx what if header2, 4 is not present or not parsable?
 					if (!protocolError) {
 						Object.defineProperty(socket, 'remoteAddress', {
 							enumerable: false,
@@ -156,10 +210,14 @@ exports.proxy = function(iface, options) {
 					socket.emit = realEmit;
 					socket.unshift(buf.slice(protocolError ? 0 : crlf+2));
 
+          // xxx check to see if new connection listeners have been added? between then and now?
 					self.emit('proxiedConnection', socket);
 
 					restore();
 
+          // xxx
+          // stream has been shifted into data mode?
+          // should readable events be still emitted?
 					if (socket.ondata) {
 						var data = socket.read();
 						if (data) socket.ondata(data, 0, data.length);
@@ -171,7 +229,6 @@ exports.proxy = function(iface, options) {
 				else if (header.length > 107) return socket.destroy('PROXY protocol error'); // PROXY header too long
 			}
 		}
-
 	}
 
 	return exports;
